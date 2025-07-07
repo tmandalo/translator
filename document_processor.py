@@ -3,6 +3,8 @@
 """
 
 import os
+import re
+import traceback
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -201,6 +203,103 @@ class DocumentProcessor:
         
         return corrected_images
     
+    def _perform_hybrid_validation(self):
+        """
+        ГИБРИДНАЯ ВАЛИДАЦИЯ: Дополнительная диагностика позиций изображений
+        Проверяет соответствие между XML-парсингом и python-docx API
+        """
+        if not self.images or not self.document:
+            return
+            
+        total_paragraphs = len(self.document.paragraphs)
+        
+        print(f"\n🔍 ГИБРИДНАЯ ВАЛИДАЦИЯ: Проверяем корректность позиций")
+        print(f"📊 Python-docx видит: {total_paragraphs} параграфов")
+        
+        # Проверяем количество параграфов с XML стороны
+        xml_paragraphs_count = None
+        if hasattr(self.improved_image_processor, '_last_positions'):
+            # Попытка получить количество XML параграфов из логов процессора
+            try:
+                import zipfile
+                import xml.etree.ElementTree as ET
+                
+                with zipfile.ZipFile(self.file_path, 'r') as docx_zip:
+                    doc_content = docx_zip.read('word/document.xml')
+                    root = ET.fromstring(doc_content)
+                    body = root.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body')
+                    
+                    if body is not None:
+                        xml_paragraphs = body.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p')
+                        xml_paragraphs_count = len(xml_paragraphs)
+                        print(f"📊 XML-парсер видит: {xml_paragraphs_count} параграфов")
+                        
+            except Exception as e:
+                print(f"⚠️  Не удалось получить количество XML параграфов: {e}")
+        
+        # Валидация 1: Проверка соответствия количества параграфов
+        validation_issues = []
+        
+        if xml_paragraphs_count is not None:
+            if xml_paragraphs_count != total_paragraphs:
+                issue = f"Несоответствие количества параграфов: XML={xml_paragraphs_count}, python-docx={total_paragraphs}"
+                validation_issues.append(issue)
+                print(f"⚠️  {issue}")
+            else:
+                print(f"✅ Количество параграфов соответствует: {total_paragraphs}")
+        
+        # Валидация 2: Проверка позиций изображений
+        valid_positions = 0
+        invalid_positions = 0
+        out_of_range_positions = 0
+        
+        for image in self.images:
+            if image.paragraph_index is None:
+                invalid_positions += 1
+                print(f"⚠️  Изображение {image.image_id}: позиция не определена (None)")
+            elif image.paragraph_index < 0:
+                invalid_positions += 1
+                validation_issues.append(f"Изображение {image.image_id} имеет отрицательную позицию: {image.paragraph_index}")
+                print(f"⚠️  Изображение {image.image_id}: отрицательная позиция {image.paragraph_index}")
+            elif image.paragraph_index >= total_paragraphs:
+                out_of_range_positions += 1
+                validation_issues.append(f"Изображение {image.image_id} имеет позицию {image.paragraph_index}, превышающую количество параграфов ({total_paragraphs})")
+                print(f"❌ Изображение {image.image_id}: позиция {image.paragraph_index} превышает максимум ({total_paragraphs-1})")
+            else:
+                valid_positions += 1
+                print(f"✅ Изображение {image.image_id}: валидная позиция {image.paragraph_index}")
+        
+        # Валидация 3: Статистика и рекомендации
+        total_images = len(self.images)
+        success_rate = (valid_positions / total_images * 100) if total_images > 0 else 0
+        
+        print(f"\n📊 РЕЗУЛЬТАТЫ ГИБРИДНОЙ ВАЛИДАЦИИ:")
+        print(f"  ✅ Валидные позиции: {valid_positions}/{total_images} ({success_rate:.1f}%)")
+        print(f"  ❌ Невалидные позиции: {invalid_positions}")
+        print(f"  🚫 Позиции вне диапазона: {out_of_range_positions}")
+        
+        # Предупреждения и рекомендации
+        if validation_issues:
+            print(f"\n⚠️  ОБНАРУЖЕНЫ ПРОБЛЕМЫ ({len(validation_issues)}):")
+            for i, issue in enumerate(validation_issues, 1):
+                print(f"   {i}. {issue}")
+                
+            if success_rate < 50:
+                print(f"\n🚨 КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: Успешность позиционирования составляет всего {success_rate:.1f}%")
+                print(f"   Рекомендуется проверить алгоритм извлечения позиций в improved_image_processor.py")
+            elif success_rate < 80:
+                print(f"\n⚠️  ПРЕДУПРЕЖДЕНИЕ: Успешность позиционирования {success_rate:.1f}% ниже ожидаемой")
+                print(f"   Возможны проблемы с форматом документа или edge cases")
+        else:
+            print(f"✅ Все проверки пройдены успешно!")
+        
+        # Валидация 4: Проверка memory в update_memory tool при обнаружении критических проблем
+        if success_rate < 30 and len(validation_issues) > 3:
+            print(f"\n🔧 СИСТЕМА САМОДИАГНОСТИКИ: Обнаружены серьезные проблемы позиционирования")
+            print(f"   Возможно, требуется дополнительная отладка алгоритма извлечения изображений")
+        
+        print(f"─" * 60)
+    
     def _find_nearest_significant_paragraph(self, target_index: int, significant_paragraphs: List[dict]) -> Optional[int]:
         """Находит ближайший значимый параграф к заданному индексу"""
         if not significant_paragraphs:
@@ -335,6 +434,9 @@ class DocumentProcessor:
             image_infos = self.improved_image_processor.extract_images_from_docx(self.file_path)
             self.images = ImageAdapter.convert_list_to_image_elements(image_infos)
             print(f"🔍 Результат улучшенного процессора: {len(self.images)} изображений")
+            
+            # === ГИБРИДНАЯ ВАЛИДАЦИЯ (дополнительная защита) ===
+            self._perform_hybrid_validation()
             
             # Трекинг позиций после извлечения
             self._track_image_positions('extraction', self.images, {'source': 'improved_processor'})
@@ -685,90 +787,62 @@ class DocumentProcessor:
     
     def create_translated_document(self, translation_results: List[Any]) -> Optional[Document]:
         """
-        Создает новый документ с переведенным текстом и изображениями
-        
-        Args:
-            translation_results: Результаты перевода
-            
-        Returns:
-            Новый документ с переводом и изображениями
+        ИСПРАВЛЕНО v2: Создает документ, корректно обрабатывая пустые строки для точной верстки.
         """
         try:
-            # Создаем новый документ
             new_document = Document()
+            EMPTY_PARA_MARKER = "[[EMPTY_PARAGRAPH_MARKER]]"
             
-            text_result_index = 0
-            print(f"🔄 Обрабатываем {len(self.elements)} элементов документа")
+            full_translated_text = '\n\n'.join(
+                res.translated_text for res in translation_results if res.success
+            )
             
-            # Статистика для логирования
-            insertion_stats = {
-                'total_elements': len(self.elements),
-                'images_inserted': 0,
-                'images_failed': 0,
-                'paragraphs_processed': 0,
-                'tables_processed': 0
-            }
-            
-            # Логируем начало этапа вставки
-            self._log_image_processing_stage('insertion', insertion_stats)
-            
-            # УЛУЧШЕННАЯ обработка элементов с правильным позиционированием изображений
+            translated_paragraphs = list(filter(None, re.split(r'\n\s*\n', full_translated_text)))
+            translated_paragraph_iterator = iter(translated_paragraphs)
+
+            print(f"🔄 Обрабатываем {len(self.elements)} элементов документа.")
+            print(f"📄 Получено {len(translated_paragraphs)} переведенных текстовых блоков для вставки.")
+
             for element_idx, element in enumerate(self.elements):
-                print(f"🔄 Элемент {element_idx + 1}/{len(self.elements)}: {element.element_type}")
-                
                 if element.element_type == 'image':
-                    # УЛУЧШЕННАЯ вставка изображений с проверкой позиционирования
                     if element.image_element:
-                        # Проверяем, нужно ли создавать отдельный параграф или использовать существующий
-                        success = self._insert_image_with_smart_positioning(new_document, element.image_element, element_idx)
-                        if success:
-                            print(f"✅ Изображение {element.image_element.image_id} добавлено с умным позиционированием")
-                            insertion_stats['images_inserted'] += 1
-                        else:
-                            print(f"❌ Не удалось добавить изображение {element.image_element.image_id}")
-                            insertion_stats['images_failed'] += 1
-                        
+                        self._insert_image_with_smart_positioning(new_document, element.image_element, element_idx)
+                
                 elif element.element_type == 'paragraph':
-                    # Добавляем переведенный текст с сохранением форматирования
-                    if text_result_index < len(translation_results):
-                        translation_result = translation_results[text_result_index]
-                        if hasattr(translation_result, 'translated_text') and translation_result.success:
-                            # УЛУЧШЕННОЕ создание параграфа с учетом контекста
-                            paragraph = self._create_translated_paragraph_with_context(
-                                new_document, 
-                                element, 
-                                translation_result.translated_text,
-                                element_idx
-                            )
-                            
-                            print(f"✅ Параграф {text_result_index + 1} добавлен с контекстом")
-                            insertion_stats['paragraphs_processed'] += 1
-                        else:
-                            print(f"❌ Пропущен параграф {text_result_index + 1} (неуспешный перевод)")
-                            
-                        text_result_index += 1
-                        
+                    if not element.content.strip():
+                        new_document.add_paragraph()
+                        print(f"📄 Пустой параграф (элемент {element_idx}) сохранен для верстки.")
+                    else:
+                        try:
+                            translated_text = next(translated_paragraph_iterator)
+                            if translated_text.strip() and translated_text != EMPTY_PARA_MARKER:
+                                self._create_translated_paragraph_with_context(
+                                    new_document, element, translated_text, element_idx
+                                )
+                            else:
+                                new_document.add_paragraph()
+                        except StopIteration:
+                            print(f"⚠️  Предупреждение: закончился переведенный текст на элементе {element_idx}.")
+                
                 elif element.element_type == 'table':
-                    # Добавляем переведенную таблицу
-                    if text_result_index < len(translation_results):
-                        translation_result = translation_results[text_result_index]
-                        if hasattr(translation_result, 'translated_text') and translation_result.success:
-                            self._add_translated_table(new_document, translation_result.translated_text, element.formatting)
-                            print(f"✅ Таблица {text_result_index + 1} добавлена")
-                            insertion_stats['tables_processed'] += 1
-                        else:
-                            print(f"❌ Пропущена таблица {text_result_index + 1} (неуспешный перевод)")
-                            
-                        text_result_index += 1
+                    try:
+                        translated_text_for_table = next(translated_paragraph_iterator)
+                        self._add_translated_table(new_document, translated_text_for_table, element.formatting)
+                    except StopIteration:
+                        print(f"⚠️  Предупреждение: закончился переведенный текст для таблицы на элементе {element_idx}.")
             
-            # Логируем финальную статистику вставки
-            self._log_image_processing_stage('insertion', insertion_stats)
-            
-            print(f"✅ Документ создан: {len(new_document.paragraphs)} параграфов")
+            remaining_paragraphs = list(translated_paragraph_iterator)
+            if remaining_paragraphs:
+                print(f"⚠️  Предупреждение: {len(remaining_paragraphs)} переведенных параграфов остались неиспользованными. Вставляем их в конец.")
+                for rem_para in remaining_paragraphs:
+                    new_document.add_paragraph(rem_para)
+
+            print(f"✅ Документ создан: {len(new_document.paragraphs)} параграфов, {len(new_document.inline_shapes)} изображений.")
             return new_document
             
         except Exception as e:
-            print(f"❌ Ошибка создания переведенного документа: {e}")
+            print(f"❌ КРИТИЧЕСКАЯ Ошибка создания переведенного документа: {e}")
+            traceback.print_exc()
             return None
     
     def _apply_advanced_formatting(self, paragraph: Paragraph, original_text: str, 
@@ -1194,11 +1268,26 @@ class DocumentProcessor:
         return formatting_summary
     
     def get_all_text(self) -> str:
-        """Возвращает весь текст документа (без изображений)"""
+        """
+        ИСПРАВЛЕНО: Возвращает весь текст документа, сохраняя пустые строки
+        в виде специального маркера для точной верстки.
+        """
         if not self.elements:
             return ""
         
-        return '\n\n'.join(elem.content for elem in self.elements if elem.element_type != 'image')
+        EMPTY_PARA_MARKER = "[[EMPTY_PARAGRAPH_MARKER]]"
+        
+        content_parts = []
+        for elem in self.elements:
+            if elem.element_type == 'paragraph':
+                if not elem.content.strip():
+                    content_parts.append(EMPTY_PARA_MARKER)
+                else:
+                    content_parts.append(elem.content)
+            elif elem.element_type == 'table':
+                content_parts.append(elem.content)
+        
+        return '\n\n'.join(content_parts)
 
     def _log_image_processing_stage(self, stage: str, details: Dict[str, Any]):
         """

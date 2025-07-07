@@ -187,8 +187,8 @@ class ImprovedImageProcessor:
     
     def _parse_document_for_images(self, docx_zip: zipfile.ZipFile) -> Dict[str, int]:
         """
-        УЛУЧШЕННЫЙ парсинг основного документа для поиска позиций изображений
-        Обеспечивает более точное определение позиций и лучшую совместимость с python-docx
+        ИСПРАВЛЕННЫЙ парсинг основного документа для поиска позиций изображений.
+        Эта версия напрямую сопоставляет индексы XML параграфов с индексами python-docx.
         """
         image_positions = {}
         
@@ -203,140 +203,50 @@ class ImprovedImageProcessor:
                 self.logger.warning("Не найден body элемент в документе")
                 return image_positions
             
-            # Получаем ВСЕ параграфы из body (включая пустые)
-            # Это важно для правильного сопоставления с python-docx
-            all_paragraphs = body.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p')
+            # Получаем ВСЕ параграфы из body. Их порядок и количество точно соответствуют
+            # списку document.paragraphs в библиотеке python-docx.
+            all_paragraphs_in_body = body.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p')
             
-            self.logger.info(f"🔍 XML парсер: найдено {len(all_paragraphs)} параграфов в основном теле документа")
-            print(f"🔍 XML парсер: найдено {len(all_paragraphs)} параграфов в основном теле документа")
+            self.logger.info(f"🔍 XML парсер: найдено {len(all_paragraphs_in_body)} параграфов в теле документа.")
+            print(f"🔍 XML парсер: найдено {len(all_paragraphs_in_body)} параграфов в теле документа.")
             
-            # Сначала проанализируем все параграфы для создания карты соответствий
-            paragraph_mapping = []
-            significant_para_count = 0
-            
-            for xml_idx, paragraph in enumerate(all_paragraphs):
-                # Анализируем содержимое параграфа
-                text_nodes = paragraph.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
-                image_nodes = paragraph.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing')
+            # Перебираем все параграфы и используем их порядковый номер как индекс
+            for paragraph_index, paragraph_element in enumerate(all_paragraphs_in_body):
                 
-                # Подсчитываем текстовое содержимое
-                text_content = ''.join(node.text or '' for node in text_nodes).strip()
-                has_meaningful_text = len(text_content) > 0
-                has_images = len(image_nodes) > 0
+                # --- Ищем relationship ID (rel_id) изображения внутри параграфа ---
                 
-                # Определяем, является ли параграф значимым
-                is_significant = has_meaningful_text or has_images
-                
-                if is_significant:
-                    paragraph_mapping.append({
-                        'xml_index': xml_idx,
-                        'docx_index': significant_para_count,
-                        'has_text': has_meaningful_text,
-                        'has_images': has_images,
-                        'text_preview': text_content[:50] + '...' if len(text_content) > 50 else text_content
-                    })
-                    significant_para_count += 1
-                    
-                    self.logger.debug(f"Параграф XML[{xml_idx}] -> DOCX[{significant_para_count-1}]: "
-                                    f"text={has_meaningful_text}, images={has_images}, "
-                                    f"preview='{text_content[:30]}...' if text_content else 'empty'")
-            
-            self.logger.info(f"🔍 Создано сопоставление: {len(paragraph_mapping)} значимых параграфов из {len(all_paragraphs)} XML параграфов")
-            print(f"🔍 Создано сопоставление: {len(paragraph_mapping)} значимых параграфов из {len(all_paragraphs)} XML параграфов")
-            
-            # Теперь ищем изображения в каждом параграфе
-            for xml_idx, paragraph in enumerate(all_paragraphs):
-                images_in_paragraph = []
-                
-                # Находим соответствующий docx индекс
-                docx_idx = None
-                for mapping in paragraph_mapping:
-                    if mapping['xml_index'] == xml_idx:
-                        docx_idx = mapping['docx_index']
-                        break
-                
-                # Если параграф не значимый, пропускаем поиск изображений
-                if docx_idx is None:
-                    continue
-                
-                # === УЛУЧШЕННЫЙ ПОИСК ИЗОБРАЖЕНИЙ ===
-                
-                # 1. Ищем изображения в drawing элементах (современный формат)
-                drawings = paragraph.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing')
+                # 1. Современный формат (drawing)
+                drawings = paragraph_element.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing')
                 for drawing in drawings:
-                    # Ищем все возможные типы изображений в drawing
                     blips = drawing.findall('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip')
                     for blip in blips:
-                        embed_id = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                        if embed_id:
-                            image_positions[embed_id] = docx_idx
-                            images_in_paragraph.append(f"drawing:{embed_id}")
-                            self.logger.debug(f"Найдено изображение в drawing: {embed_id} -> параграф {docx_idx}")
-                
-                # 2. Ищем inline изображения (встроенные изображения)  
-                inline_shapes = paragraph.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}object')
-                for inline_shape in inline_shapes:
-                    blips = inline_shape.findall('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip')
-                    for blip in blips:
-                        embed_id = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                        if embed_id:
-                            image_positions[embed_id] = docx_idx
-                            images_in_paragraph.append(f"inline:{embed_id}")
-                            self.logger.debug(f"Найдено inline изображение: {embed_id} -> параграф {docx_idx}")
-                
-                # 3. Ищем pict элементы (старый формат Word)
-                picts = paragraph.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pict')
+                        rel_id = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                        if rel_id:
+                            image_positions[rel_id] = paragraph_index
+                            self.logger.debug(f"Найдено изображение (drawing): {rel_id} -> параграф {paragraph_index}")
+
+                # 2. Старый формат (pict)
+                picts = paragraph_element.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pict')
                 for pict in picts:
-                    # Ищем различные типы изображений в pict
                     shapes = pict.findall('.//*[@r:id]', namespaces={'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'})
                     for shape in shapes:
-                        embed_id = shape.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-                        if embed_id:
-                            image_positions[embed_id] = docx_idx
-                            images_in_paragraph.append(f"pict:{embed_id}")
-                            self.logger.debug(f"Найдено pict изображение: {embed_id} -> параграф {docx_idx}")
-                
-                # 4. Ищем в run элементах (дополнительная проверка)
-                runs = paragraph.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r')
-                for run in runs:
-                    # Ищем все элементы с embed атрибутом
-                    embeds = run.findall('.//*[@r:embed]', namespaces={'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'})
-                    for embed in embeds:
-                        embed_id = embed.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                        if embed_id and embed_id not in image_positions:
-                            image_positions[embed_id] = docx_idx
-                            images_in_paragraph.append(f"run:{embed_id}")
-                            self.logger.debug(f"Найдено run изображение: {embed_id} -> параграф {docx_idx}")
-                
-                # 5. Дополнительный поиск по альтернативным атрибутам
-                # Ищем элементы с r:id (alternative relationship format)
-                alt_images = paragraph.findall('.//*[@r:id]', namespaces={'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'})
-                for alt_img in alt_images:
-                    embed_id = alt_img.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-                    if embed_id and embed_id not in image_positions:
-                        # Проверяем, что это действительно изображение
-                        if self._is_image_relationship(embed_id):
-                            image_positions[embed_id] = docx_idx
-                            images_in_paragraph.append(f"alt:{embed_id}")
-                            self.logger.debug(f"Найдено альтернативное изображение: {embed_id} -> параграф {docx_idx}")
-                
-                # Логируем найденные изображения в параграфе
-                if images_in_paragraph:
-                    self.logger.info(f"📍 Параграф XML[{xml_idx}] -> DOCX[{docx_idx}]: найдено {len(images_in_paragraph)} изображений: {', '.join(images_in_paragraph)}")
-                    print(f"📍 Параграф XML[{xml_idx}] -> DOCX[{docx_idx}]: {len(images_in_paragraph)} изображений - {', '.join(images_in_paragraph)}")
-                    
+                        rel_id = shape.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                        if rel_id and rel_id not in image_positions:
+                             image_positions[rel_id] = paragraph_index
+                             self.logger.debug(f"Найдено изображение (pict): {rel_id} -> параграф {paragraph_index}")
+
             # Финальная статистика
             self.logger.info(f"🎯 ИТОГО найдено позиций изображений: {len(image_positions)}")
             print(f"🎯 ИТОГО найдено позиций изображений: {len(image_positions)}")
             
             # Детальный вывод всех найденных позиций
-            for embed_id, para_idx in sorted(image_positions.items(), key=lambda x: x[1]):
-                self.logger.info(f"  📌 Изображение {embed_id} -> параграф {para_idx}")
-                print(f"  📌 Изображение {embed_id} -> параграф {para_idx}")
-                            
+            for rel_id, para_idx in sorted(image_positions.items(), key=lambda x: x[1]):
+                self.logger.info(f"  📌 Изображение {rel_id} -> параграф {para_idx}")
+                print(f"  📌 Изображение {rel_id} -> параграф {para_idx}")
+
         except Exception as e:
-            self.logger.error(f"❌ Ошибка УЛУЧШЕННОГО парсинга документа для изображений: {e}")
-            print(f"❌ Ошибка УЛУЧШЕННОГО парсинга документа для изображений: {e}")
+            self.logger.error(f"❌ Ошибка ИСПРАВЛЕННОГО парсинга документа для изображений: {e}")
+            print(f"❌ Ошибка ИСПРАВЛЕННОГО парсинга документа для изображений: {e}")
             
         return image_positions
     

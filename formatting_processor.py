@@ -266,42 +266,23 @@ class FormattingProcessor:
             return False
     
     def _apply_run_formatting(self, run: Run, segment: FormattingSegment):
-        """Применяет форматирование к отдельному run - КОНСЕРВАТИВНЫЙ режим"""
+        """Применяет форматирование к отдельному run - СТРОГИЙ КОНСЕРВАТИВНЫЙ режим"""
         try:
-            # Жирный шрифт
+            # Применяем только базовое форматирование: жирный, курсив, подчеркивание.
             if segment.bold is not None:
                 run.bold = segment.bold
             
-            # Курсив
             if segment.italic is not None:
                 run.italic = segment.italic
             
-            # Подчеркивание
             if segment.underline is not None:
                 run.underline = segment.underline
             
-            # Название шрифта - заменяем моноскрипт на стандартные шрифты
-            if segment.font_name:
-                try:
-                    # Моноскрипт шрифты заменяем на стандартные
-                    if segment.font_name.lower() in ['courier', 'courier new', 'monaco', 'consolas', 'menlo', 'inconsolata']:
-                        run.font.name = 'Calibri'  # Заменяем на стандартный
-                    else:
-                        run.font.name = segment.font_name
-                except:
-                    pass  # Игнорируем ошибки с неподдерживаемыми шрифтами
+            # --- ЦВЕТ И ШРИФТЫ ПОЛНОСТЬЮ ИГНОРИРУЮТСЯ ---
+            # Это предотвращает "протекание" синего цвета и других стилей.
             
-            # Размер шрифта - ограничиваем разумными пределами
-            if segment.font_size and 8 <= segment.font_size <= 72:
-                try:
-                    run.font.size = Pt(segment.font_size)
-                except:
-                    pass  # Игнорируем ошибки размера
-            
-            # НЕ применяем цвет шрифта для избежания синего выделения
-                    
         except Exception as e:
-            print(f"Ошибка применения форматирования к run: {e}")
+            print(f"Ошибка применения базового форматирования к run: {e}")
     
     def _apply_font_color(self, run: Run, color_value: str):
         """Применяет цвет шрифта к run - ОТКЛЮЧЕНО для избежания синего выделения"""
