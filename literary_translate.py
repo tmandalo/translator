@@ -7,6 +7,7 @@
 import sys
 import os
 import argparse
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -127,41 +128,19 @@ def test_api_connection() -> bool:
         return False
 
 
-def main():
-    """Основная функция программы"""
-    # Парсим аргументы
-    args = parse_arguments()
-    
-    # Настраиваем логирование
-    setup_logging(args.log_level)
-    
+async def run_translation(args):
+    """Асинхронная функция для перевода документа"""
     # Создаем объект для логирования
     logger = TranslationLogger()
     
-    # Если нужно только протестировать API
-    if args.test_api:
-        sys.exit(0 if test_api_connection() else 1)
-    
-    # Проверяем, что указан входной файл
-    if not args.input_file:
-        print("❌ Не указан входной файл")
-        sys.exit(1)
-    
-    # Проверяем входные данные
-    if not validate_input_file(args.input_file):
-        sys.exit(1)
-    
     # Генерируем имя выходного файла
     output_file = generate_output_filename(args.input_file)
-    
-    if not validate_output_file(output_file):
-        sys.exit(1)
     
     # Логируем начало работы
     logger.log_start(args.input_file, output_file)
     
     try:
-                # Создаем процессор документов
+        # Создаем процессор документов
         doc_processor = DocumentProcessor()
         
         # Загружаем документ
@@ -169,8 +148,8 @@ def main():
             logger.log_error("Не удалось загрузить документ")
             sys.exit(1)
         
-        # --- НОВАЯ УПРОЩЕННАЯ ЛОГИКА ---
-        new_document = doc_processor.process_and_translate()
+        # --- НОВАЯ АСИНХРОННАЯ ЛОГИКА ---
+        new_document = await doc_processor.process_and_translate_async()
 
         if not new_document:
             logger.log_error("Не удалось обработать и перевести документ")
@@ -198,6 +177,45 @@ def main():
         sys.exit(1)
     except Exception as e:
         logger.log_error(f"Неожиданная ошибка: {str(e)}")
+        sys.exit(1)
+
+
+def main():
+    """Основная функция программы"""
+    # Парсим аргументы
+    args = parse_arguments()
+    
+    # Настраиваем логирование
+    setup_logging(args.log_level)
+    
+    # Если нужно только протестировать API
+    if args.test_api:
+        sys.exit(0 if test_api_connection() else 1)
+    
+    # Проверяем, что указан входной файл
+    if not args.input_file:
+        print("❌ Не указан входной файл")
+        sys.exit(1)
+    
+    # Проверяем входные данные
+    if not validate_input_file(args.input_file):
+        sys.exit(1)
+    
+    # Генерируем имя выходного файла
+    output_file = generate_output_filename(args.input_file)
+    
+    if not validate_output_file(output_file):
+        sys.exit(1)
+    
+    try:
+        # Запускаем асинхронную функцию перевода
+        asyncio.run(run_translation(args))
+        
+    except KeyboardInterrupt:
+        print("❌ Операция была прервана пользователем")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Неожиданная ошибка: {str(e)}")
         sys.exit(1)
 
 

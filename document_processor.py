@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 import time
+import asyncio
 
 from docx import Document
 from docx.shared import Inches
@@ -161,6 +162,89 @@ class DocumentProcessor:
         # TODO: Добавить такую же поэлементную обработку для таблиц, если требуется.
 
         print("\n✅ Реконструкция документа завершена.")
+        return new_doc
+    
+    async def process_and_translate_async(self) -> Optional[Document]:
+        """
+        АСИНХРОННАЯ версия метода: поэлементная реконструкция документа с переводом
+        """
+        if not self.document:
+            print("❌ Документ не загружен.")
+            return None
+
+        # 1. Извлекаем информацию об изображениях и их позициях
+        print("🔍 Шаг 1: Извлечение информации об изображениях...")
+        image_infos = self.improved_image_processor.extract_images_from_docx(self.file_path)
+        self.images = ImageAdapter.convert_list_to_image_elements(image_infos)
+        
+        images_by_paragraph = {}
+        for img in self.images:
+            if img.paragraph_index is not None:
+                if img.paragraph_index not in images_by_paragraph:
+                    images_by_paragraph[img.paragraph_index] = []
+                images_by_paragraph[img.paragraph_index].append(img)
+        
+        print(f"✅ Найдено {len(self.images)} изображений, распределено по {len(images_by_paragraph)} параграфам.")
+
+        # 2. Собираем все тексты для перевода
+        print("\n🔍 Шаг 2: Сбор текстов для параллельного перевода...")
+        texts_to_translate = []
+        paragraph_indices = []
+        
+        for i, p in enumerate(self.document.paragraphs):
+            if p.text.strip():
+                texts_to_translate.append(p.text)
+                paragraph_indices.append(i)
+        
+        print(f"✅ Собрано {len(texts_to_translate)} текстов для перевода")
+
+        # 3. Параллельный перевод всех текстов
+        print("\n🚀 Шаг 3: Параллельный перевод текстов...")
+        
+        def progress_callback(completed, total, success):
+            percentage = (completed / total) * 100 if total > 0 else 0
+            status = "✅" if success else "❌"
+            print(f"  {status} Переведено: {completed}/{total} ({percentage:.1f}%)")
+        
+        translation_results = await self.translator.api_translator.translate_texts_in_parallel(
+            texts_to_translate, progress_callback
+        )
+        
+        # 4. Создаем новый документ и восстанавливаем структуру
+        print("\n🔄 Шаг 4: Восстановление структуры документа...")
+        new_doc = Document()
+        translation_index = 0
+        
+        total_paragraphs = len(self.document.paragraphs)
+        
+        for i, p in enumerate(self.document.paragraphs):
+            
+            # A. Вставляем изображения, которые идут ПЕРЕД этим параграфом
+            if i in images_by_paragraph:
+                for image_element in sorted(images_by_paragraph[i], key=lambda img: img.image_id):
+                    self._insert_image_with_smart_positioning(new_doc, image_element, i)
+                    print(f"🖼️  Изображение {image_element.image_id} вставлено перед параграфом {i}")
+
+            # B. Обрабатываем сам параграф
+            if p.text.strip():
+                # Используем переведенный текст
+                if translation_index < len(translation_results):
+                    result = translation_results[translation_index]
+                    translation_index += 1
+                    
+                    if result.success:
+                        para_formatting = self._extract_paragraph_formatting(p)
+                        new_para = new_doc.add_paragraph()
+                        self._apply_advanced_formatting(new_para, p.text, result.translated_text, para_formatting)
+                    else:
+                        new_doc.add_paragraph(f"[ОШИБКА ПЕРЕВОДА] {p.text}")
+                else:
+                    new_doc.add_paragraph(f"[ОШИБКА ИНДЕКСА] {p.text}")
+            else:
+                # Если параграф пустой - просто добавляем пустой параграф для сохранения верстки
+                new_doc.add_paragraph()
+
+        print("\n✅ Асинхронная реконструкция документа завершена.")
         return new_doc
     
     def _validate_and_correct_image_positions(self, images: List[ImageElement]) -> List[ImageElement]:
@@ -975,42 +1059,28 @@ class DocumentProcessor:
             paragraph.add_run(translated_text)
     
     def _insert_image_with_smart_positioning(self, document: Document, image_element: ImageElement, element_index: int) -> bool:
-        """
-        УЛУЧШЕННАЯ вставка изображения с умным позиционированием
-        
-        Args:
-            document: Целевой документ
-            image_element: Элемент изображения
-            element_index: Индекс элемента в общем списке
-            
-        Returns:
-            True если вставка успешна, False иначе
-        """
+        """ИСПРАВЛЕНО: Упрощенная и надежная вставка изображения."""
         try:
-            # Анализируем контекст для принятия решения о позиционировании
-            positioning_context = self._analyze_image_positioning_context(element_index)
-            
-            # Получаем путь к временному файлу изображения
             temp_path = self._get_image_temp_path(image_element)
             if not temp_path:
+                print(f"❌ Не удалось получить путь для изображения {image_element.image_id}")
                 return False
+
+            p = document.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run()
             
-            # Определяем стратегию вставки на основе контекста
-            if positioning_context['use_existing_paragraph']:
-                # Вставляем в существующий параграф
-                target_paragraph = positioning_context['target_paragraph']
-                success = self._insert_image_into_existing_paragraph(target_paragraph, image_element, temp_path)
+            width, height = self._calculate_optimal_image_size(image_element)
+            
+            if height:
+                run.add_picture(temp_path, width=width, height=height)
             else:
-                # Создаем новый параграф для изображения
-                success = self._insert_image_into_new_paragraph(document, image_element, temp_path, positioning_context)
-            
-            if success:
-                print(f"🖼️  УМНОЕ ПОЗИЦИОНИРОВАНИЕ: Изображение {image_element.image_id} вставлено по стратегии '{positioning_context['strategy']}'")
-            
-            return success
-            
+                run.add_picture(temp_path, width=width)
+            return True
         except Exception as e:
-            print(f"❌ Ошибка умной вставки изображения {image_element.image_id}: {e}")
+            import traceback
+            print(f"❌ Ошибка вставки изображения {image_element.image_id}: {e}")
+            traceback.print_exc()
             return False
     
     def _create_translated_paragraph_with_context(self, document: Document, element: DocumentElement, translated_text: str, element_index: int) -> Paragraph:
@@ -1064,31 +1134,8 @@ class DocumentProcessor:
         return paragraph
     
     def _analyze_image_positioning_context(self, element_index: int) -> Dict[str, Any]:
-        """Анализирует контекст для определения стратегии позиционирования изображения"""
-        context = {
-            'strategy': 'new_paragraph',
-            'use_existing_paragraph': False,
-            'target_paragraph': None,
-            'needs_spacing': True,
-            'alignment': WD_ALIGN_PARAGRAPH.CENTER
-        }
-        
-        # Анализируем соседние элементы
-        prev_element = self.elements[element_index - 1] if element_index > 0 else None
-        next_element = self.elements[element_index + 1] if element_index < len(self.elements) - 1 else None
-        
-        # Определяем стратегию на основе контекста
-        if prev_element and prev_element.element_type == 'image':
-            context['strategy'] = 'image_group'
-            context['needs_spacing'] = False
-        elif next_element and next_element.element_type == 'image':
-            context['strategy'] = 'image_group_start'
-            context['needs_spacing'] = True
-        else:
-            context['strategy'] = 'standalone'
-            context['needs_spacing'] = True
-        
-        return context
+        """УСТАРЕЛО: Эта функция больше не нужна."""
+        return {'strategy': 'new_paragraph_standalone', 'alignment': WD_ALIGN_PARAGRAPH.CENTER}
     
     def _analyze_paragraph_context(self, element_index: int) -> Dict[str, Any]:
         """Анализирует контекст параграфа для определения необходимых настроек"""

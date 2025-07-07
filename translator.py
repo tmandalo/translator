@@ -5,11 +5,15 @@
 import time
 import json
 import logging
+import re
+import asyncio
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
 import requests
+import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import AsyncRetrying, RetryError
 
 from config import config
 from text_chunker import TextChunk
@@ -33,15 +37,12 @@ class OpenRouterTranslator:
         self.api_key = config.openrouter_api_key
         self.model = config.openrouter_model
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.session = requests.Session()
-        
-        # Настраиваем заголовки
-        self.session.headers.update({
+        self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/your-repo",  # Обязательно для OpenRouter
+            "HTTP-Referer": "https://github.com/tmandalo/translator",
             "X-Title": "Literary Document Translator"
-        })
+        }
         
         # Настраиваем логирование
         self.logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ class OpenRouterTranslator:
     -   **Адаптация идиом:** Адаптируйте идиомы и фразеологизмы так, чтобы они были понятны русскоязычному читателю, сохраняя при этом первоначальный смысл и эффект.
 
 ВАШЕ КРЕДО: "Точность оригинала, воплощенная в красоте родного языка". Вы не упрощаете и не додумываете. Вы пересоздаете.
-
+В вашем ответе не должно быть ничего, абсолютно ничего, кроме перевода.
 Переведите следующий текст, строго придерживаясь этих принципов:
 """
     
@@ -94,6 +95,17 @@ class OpenRouterTranslator:
         self.logger.debug(f"Текст: {len(text)} символов, расчетные токены вывода: {output_tokens_estimate}, используем: {optimal_tokens}")
         
         return optimal_tokens
+    
+    def _clean_llm_preamble(self, text: str) -> str:
+        """Удаляет из ответа LLM служебные преамбулы."""
+        patterns = [
+            r"^(отлично|конечно|хорошо|вот|пожалуйста)[\s,:]*(вот ваш|ваш|приступаю к|предоставляю)?\s*(перевод|текст)?[:\s]*\n*",
+            r"^(here is|sure, here is|certainly, here is)[\s,:]*(the|your)?\s*(translation)?[:\s]*\n*",
+        ]
+        cleaned_text = text
+        for pattern in patterns:
+            cleaned_text = re.sub(pattern, '', cleaned_text, count=1, flags=re.IGNORECASE).lstrip()
+        return cleaned_text
     
     @retry(
         stop=stop_after_attempt(3),
@@ -134,7 +146,9 @@ class OpenRouterTranslator:
             }
             
             # Отправляем запрос
-            response = self.session.post(
+            session = requests.Session()
+            session.headers.update(self.headers)
+            response = session.post(
                 self.base_url,
                 json=payload,
                 timeout=config.request_timeout
@@ -149,7 +163,8 @@ class OpenRouterTranslator:
             if 'choices' not in response_data or not response_data['choices']:
                 raise ValueError("Некорректный ответ от API - нет choices")
                 
-            translated_text = response_data['choices'][0]['message']['content'].strip()
+            raw_text = response_data['choices'][0]['message']['content'].strip()
+            clean_text = self._clean_llm_preamble(raw_text)
             
             # Извлекаем количество токенов если доступно
             tokens_used = None
@@ -162,7 +177,7 @@ class OpenRouterTranslator:
             
             return TranslationResult(
                 original_text=text,
-                translated_text=translated_text,
+                translated_text=clean_text,
                 success=True,
                 tokens_used=tokens_used,
                 processing_time=processing_time
@@ -200,6 +215,71 @@ class OpenRouterTranslator:
                 error=error_msg,
                 processing_time=time.time() - start_time
             )
+    
+    async def translate_text_async(self, session: aiohttp.ClientSession, text: str, semaphore: asyncio.Semaphore) -> TranslationResult:
+        """Асинхронная версия перевода текста"""
+        async with semaphore:
+            start_time = time.time()
+            retryer = AsyncRetrying(
+                stop=stop_after_attempt(config.max_retries),
+                wait=wait_exponential(multiplier=1, min=2, max=10),
+                retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+            )
+            try:
+                async for attempt in retryer:
+                    with attempt:
+                        payload = {
+                            "model": self.model,
+                            "messages": [
+                                {"role": "system", "content": self.get_translation_prompt()},
+                                {"role": "user", "content": text}
+                            ],
+                            "max_tokens": self._calculate_optimal_max_tokens(text), 
+                            "temperature": 0.3
+                        }
+                        async with session.post(self.base_url, json=payload, timeout=config.request_timeout) as response:
+                            response.raise_for_status()
+                            response_data = await response.json()
+                            if not response_data.get('choices'):
+                                raise ValueError("Некорректный ответ от API")
+                            
+                            raw_text = response_data['choices'][0]['message']['content'].strip()
+                            clean_text = self._clean_llm_preamble(raw_text)
+                            
+                            return TranslationResult(
+                                original_text=text, 
+                                translated_text=clean_text, 
+                                success=True,
+                                tokens_used=response_data.get('usage', {}).get('total_tokens'),
+                                processing_time=time.time() - start_time
+                            )
+            except Exception as e:
+                return TranslationResult(
+                    original_text=text, 
+                    translated_text="", 
+                    success=False, 
+                    error=str(e),
+                    processing_time=time.time() - start_time
+                )
+
+    async def translate_texts_in_parallel(self, texts: List[str], progress_callback=None) -> List[TranslationResult]:
+        """Параллельный перевод списка текстов"""
+        semaphore = asyncio.Semaphore(config.max_concurrent_requests)
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            tasks = [
+                asyncio.ensure_future(
+                    self.translate_text_async(session, text, semaphore) if text.strip() 
+                    else asyncio.sleep(0, result=TranslationResult(original_text=text, translated_text="", success=True))
+                ) for text in texts
+            ]
+            
+            results = []
+            for i, task in enumerate(asyncio.as_completed(tasks)):
+                result = await task
+                results.append(result)
+                if progress_callback:
+                    progress_callback(len(results), len(texts), result.success)
+            return results
     
     def translate_chunks(self, chunks: List[TextChunk], progress_callback=None) -> List[TranslationResult]:
         """
