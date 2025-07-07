@@ -161,7 +161,7 @@ def main():
     logger.log_start(args.input_file, output_file)
     
     try:
-        # Создаем процессор документов
+                # Создаем процессор документов
         doc_processor = DocumentProcessor()
         
         # Загружаем документ
@@ -169,106 +169,18 @@ def main():
             logger.log_error("Не удалось загрузить документ")
             sys.exit(1)
         
-        # Извлекаем элементы документа
-        elements = doc_processor.extract_text_elements()
-        
-        if not elements:
-            logger.log_error("Документ не содержит текстовых элементов для перевода")
+        # --- НОВАЯ УПРОЩЕННАЯ ЛОГИКА ---
+        new_document = doc_processor.process_and_translate()
+
+        if not new_document:
+            logger.log_error("Не удалось обработать и перевести документ")
             sys.exit(1)
-        
-        # Логируем статистику документа
-        doc_stats = doc_processor.get_document_statistics()
-        logger.log_document_stats(doc_stats)
-        
-        # Логируем статистику форматирования
-        formatting_stats = doc_processor.get_formatting_statistics()
-        if formatting_stats.get('total_elements', 0) > 0:
-            logger.logger.info("📝 Информация о форматировании:")
-            logger.logger.info(f"   • Сложность: {formatting_stats.get('overall_complexity', 'unknown')}")
-            logger.logger.info(f"   • Элементов с форматированием: {formatting_stats.get('total_elements', 0)}")
-            logger.logger.info(f"   • Среднее количество runs: {formatting_stats.get('average_runs_per_element', 0):.1f}")
             
-            if formatting_stats.get('elements_with_bold', 0) > 0:
-                logger.logger.info(f"   • Жирный шрифт: {formatting_stats.get('elements_with_bold', 0)} элементов")
-            if formatting_stats.get('elements_with_italic', 0) > 0:
-                logger.logger.info(f"   • Курсив: {formatting_stats.get('elements_with_italic', 0)} элементов")
-            if formatting_stats.get('elements_with_underline', 0) > 0:
-                logger.logger.info(f"   • Подчеркивание: {formatting_stats.get('elements_with_underline', 0)} элементов")
-            if formatting_stats.get('unique_fonts', 0) > 1:
-                logger.logger.info(f"   • Уникальных шрифтов: {formatting_stats.get('unique_fonts', 0)}")
-            if formatting_stats.get('unique_font_sizes', 0) > 1:
-                logger.logger.info(f"   • Уникальных размеров: {formatting_stats.get('unique_font_sizes', 0)}")
-            if formatting_stats.get('unique_colors', 0) > 0:
-                logger.logger.info(f"   • Уникальных цветов: {formatting_stats.get('unique_colors', 0)}")
-        else:
-            logger.logger.info("📝 Документ не содержит специального форматирования")
-        
-        # Создаем chunker для разбивки текста
-        chunker = TextChunker(max_chunk_size=args.chunk_size)
-        
-        # Получаем весь текст документа
-        full_text = doc_processor.get_all_text()
-        
-        # Разбиваем на блоки
-        chunks = chunker.chunk_text(full_text)
-        
-        if not chunks:
-            logger.log_error("Не удалось разбить текст на блоки")
+        if not doc_processor.save_document_with_images(new_document, output_file):
+            logger.log_error("Не удалось сохранить переведенный документ")
             sys.exit(1)
         
-        # Логируем статистику блоков
-        chunk_stats = chunker.get_chunk_statistics(chunks)
-        logger.log_chunk_stats(chunk_stats)
-        
-        # Создаем надежный переводчик
-        logger.logger.info("🔒 Использую надежный последовательный переводчик")
-        translator = DocumentTranslator()
-        
-        # Переводим блоки с прогресс-баром
-        with TranslationProgress(len(chunks)) as progress:
-            translation_results = translator.translate_document_chunks(
-                chunks,
-                progress_callback=progress.update
-            )
-        
-        # Проверяем результаты
-        if not translation_results:
-            logger.log_error("Не удалось перевести документ")
-            sys.exit(1)
-        
-        # Получаем статистику перевода
-        translation_stats = translator.api_translator.get_translation_statistics(translation_results)
-        
-        # Показываем итоговую статистику
-        with TranslationProgress(len(chunks)) as progress:
-            progress.show_summary(translation_stats)
-        
-        # Проверяем, что все блоки переведены успешно
-        successful_translations = [r for r in translation_results if r.success]
-        
-        if len(successful_translations) == 0:
-            logger.log_error("Ни один блок не был переведен успешно")
-            sys.exit(1)
-        
-        # Создаем новый документ с переводом и изображениями
-        try:
-            new_document = doc_processor.create_translated_document(successful_translations)
-            
-            if not new_document:
-                logger.log_error("Не удалось создать переведенный документ")
-                sys.exit(1)
-            
-            # Сохраняем новый документ
-            if not doc_processor.save_document_with_images(new_document, output_file):
-                logger.log_error("Не удалось сохранить переведенный документ")
-                sys.exit(1)
-                
-        except Exception as e:
-            logger.log_error(f"Ошибка создания документа с изображениями: {str(e)}")
-            sys.exit(1)
-        finally:
-            # Очищаем временные файлы изображений
-            doc_processor.cleanup_temp_files()
+        doc_processor.cleanup_temp_files()
         
         # Сохраняем XML файл если нужно
         xml_file = None

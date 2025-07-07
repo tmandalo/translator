@@ -24,6 +24,29 @@ from docx.table import Table
 from improved_image_processor import ImprovedImageProcessor, ImageElement, ImageInfo
 from image_adapter import ImageAdapter
 from formatting_processor import FormattingProcessor
+from translator import DocumentTranslator, TranslationResult
+
+
+class TranslationProgress:
+    """Класс для отслеживания прогресса перевода"""
+    
+    def __init__(self, total_items):
+        self.total_items = total_items
+        self.start_time = time.time()
+        
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+        
+    def update(self, current_item, total_items, show_details=False):
+        """Обновляет и отображает прогресс"""
+        elapsed = time.time() - self.start_time
+        percentage = (current_item / total_items) * 100 if total_items > 0 else 0
+        
+        if show_details:
+            print(f"    Прогресс: {current_item}/{total_items} ({percentage:.1f}%) - {elapsed:.1f}с")
 
 
 @dataclass
@@ -48,6 +71,7 @@ class DocumentProcessor:
         self.images: List[ImageElement] = []
         self.file_path = None
         self.formatting_processor = FormattingProcessor()
+        self.translator = DocumentTranslator()
         
         # СИСТЕМА ОТСЛЕЖИВАНИЯ ПОЗИЦИЙ
         self.position_tracker = {
@@ -77,6 +101,67 @@ class DocumentProcessor:
         except Exception as e:
             print(f"Ошибка загрузки документа: {e}")
             return False
+    
+    def process_and_translate(self) -> Optional[Document]:
+        """
+        ФИНАЛЬНАЯ ВЕРСИЯ: Главный метод, который выполняет поэлементную реконструкцию
+        документа с переводом, сохраняя всю структуру.
+        """
+        if not self.document:
+            print("❌ Документ не загружен.")
+            return None
+
+        # 1. Извлекаем информацию об изображениях и их позициях
+        print("🔍 Шаг 1: Извлечение информации об изображениях...")
+        image_infos = self.improved_image_processor.extract_images_from_docx(self.file_path)
+        self.images = ImageAdapter.convert_list_to_image_elements(image_infos)
+        
+        images_by_paragraph = {}
+        for img in self.images:
+            if img.paragraph_index is not None:
+                if img.paragraph_index not in images_by_paragraph:
+                    images_by_paragraph[img.paragraph_index] = []
+                images_by_paragraph[img.paragraph_index].append(img)
+        
+        print(f"✅ Найдено {len(self.images)} изображений, распределено по {len(images_by_paragraph)} параграфам.")
+
+        # 2. Создаем новый, пустой документ для результата
+        new_doc = Document()
+        
+        # 3. Итерируемся по КАЖДОМУ параграфу оригинального документа
+        print("\n🔍 Шаг 2: Поэлементная реконструкция и перевод документа...")
+        total_paragraphs = len(self.document.paragraphs)
+        
+        with TranslationProgress(total_paragraphs) as progress:
+            for i, p in enumerate(self.document.paragraphs):
+                
+                # A. Вставляем изображения, которые идут ПЕРЕД этим параграфом
+                if i in images_by_paragraph:
+                    for image_element in sorted(images_by_paragraph[i], key=lambda img: img.image_id):
+                        self._insert_image_with_smart_positioning(new_doc, image_element, i)
+                        print(f"🖼️  Изображение {image_element.image_id} вставлено перед параграфом {i}")
+
+                # B. Обрабатываем сам параграф
+                if p.text.strip():
+                    # Если есть текст - переводим
+                    print(f"  Переводим параграф {i+1}/{total_paragraphs}...")
+                    result = self.translator.api_translator.translate_text(p.text)
+                    if result.success:
+                        para_formatting = self._extract_paragraph_formatting(p)
+                        new_para = new_doc.add_paragraph()
+                        self._apply_advanced_formatting(new_para, p.text, result.translated_text, para_formatting)
+                    else:
+                        new_doc.add_paragraph(f"[ОШИБКА ПЕРЕВОДА] {p.text}")
+                else:
+                    # Если параграф пустой - просто добавляем пустой параграф для сохранения верстки
+                    new_doc.add_paragraph()
+                
+                progress.update(i + 1, total_paragraphs, True)
+        
+        # TODO: Добавить такую же поэлементную обработку для таблиц, если требуется.
+
+        print("\n✅ Реконструкция документа завершена.")
+        return new_doc
     
     def _validate_and_correct_image_positions(self, images: List[ImageElement]) -> List[ImageElement]:
         """
